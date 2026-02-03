@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net"
@@ -57,19 +58,36 @@ func runTask() {
 	// 1. 获取所有候选 IP
 	sourceDomains := strings.Split(os.Getenv("SOURCE_DOMAINS"), ",")
 	candidateIPs := getIPsFromDomains(sourceDomains)
-	log.Printf("从域名中解析去重后共获得 %d 个 IP", len(candidateIPs))
+	externalIPs := getExternalIPs()
+	existingIPs := getExistingARecordIPs()
+	unique := make(map[string]struct{})
+	for _, ip := range candidateIPs {
+		unique[ip] = struct{}{}
+	}
+	for _, ip := range externalIPs {
+		unique[ip] = struct{}{}
+	}
+	for _, ip := range existingIPs {
+		unique[ip] = struct{}{}
+	}
+	var allCandidates []string
+	for ip := range unique {
+		allCandidates = append(allCandidates, ip)
+	}
+	log.Printf("候选 IP 总数(包含现有 A 记录): %d", len(allCandidates))
 
-	if len(candidateIPs) == 0 {
+	if len(allCandidates) == 0 {
 		log.Println("未获取到任何 IP，跳过本次执行")
 		return
 	}
 
 	// 2. 并发测速 (TCP Latency)
-	results := testIPSpeed(candidateIPs)
+	results := testIPSpeed(allCandidates)
 	log.Printf("有效响应的 IP 数量: %d", len(results))
 
-	if len(results) == 0 {
-		log.Println("所有 IP 均无法连接，跳过")
+	if len(results) <= 3 {
+		log.Println("有效 IP 数量不足，阈值为 > 3，本次不更新")
+		sendBarkNotification("Cloudflare 优选 IP 未更新", fmt.Sprintf("有效IP不足，数量: %d", len(results)))
 		return
 	}
 
@@ -103,6 +121,159 @@ func runTask() {
 	msg := fmt.Sprintf("成功更新 %d 个优选 IP\n平均延迟: %v", len(bestIPStrings), bestIPs[0].Latency)
 	sendBarkNotification("Cloudflare 优选 IP 已更新", msg)
 	log.Println("------ 本轮结束 ------")
+}
+
+func getExternalIPs() []string {
+	var out []string
+	timeout := 5 * time.Second
+	ips1 := fetchVps789IPs(timeout)
+	ips2 := fetchWeTestIPs(timeout)
+	uniq := make(map[string]struct{})
+	for _, ip := range append(ips1, ips2...) {
+		if net.ParseIP(ip) != nil && strings.Count(ip, ".") == 3 {
+			uniq[ip] = struct{}{}
+		}
+	}
+	for ip := range uniq {
+		out = append(out, ip)
+	}
+	return out
+}
+
+func fetchVps789IPs(timeout time.Duration) []string {
+	client := &http.Client{Timeout: timeout}
+	req, err := http.NewRequest("GET", "https://vps789.com/public/sum/cfIpApi", nil)
+	if err != nil {
+		log.Printf("请求 vps789 失败: %v", err)
+		return nil
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		log.Printf("获取 vps789 响应失败: %v", err)
+		return nil
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		log.Printf("vps789 返回状态码: %d", resp.StatusCode)
+		return nil
+	}
+	var body struct {
+		Code int `json:"code"`
+		Data map[string][]struct {
+			IP string `json:"ip"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		log.Printf("解析 vps789 JSON 失败: %v", err)
+		return nil
+	}
+	var ips []string
+	for _, arr := range body.Data {
+		for _, item := range arr {
+			if item.IP != "" {
+				ips = append(ips, item.IP)
+			}
+		}
+	}
+	return ips
+}
+
+func fetchWeTestIPs(timeout time.Duration) []string {
+	client := &http.Client{Timeout: timeout}
+	req, err := http.NewRequest("GET", "https://www.wetest.vip/api/cf2dns/get_cloudflare_ip?key=o1zrmHAF&type=v4", nil)
+	if err != nil {
+		log.Printf("请求 wetest 失败: %v", err)
+		return nil
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		log.Printf("获取 wetest 响应失败: %v", err)
+		return nil
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		log.Printf("wetest 返回状态码: %d", resp.StatusCode)
+		return nil
+	}
+	var body struct {
+		Status bool `json:"status"`
+		Info   map[string][]struct {
+			IP string `json:"ip"`
+		} `json:"info"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		log.Printf("解析 wetest JSON 失败: %v", err)
+		return nil
+	}
+	var ips []string
+	for _, arr := range body.Info {
+		for _, item := range arr {
+			if item.IP != "" {
+				ips = append(ips, item.IP)
+			}
+		}
+	}
+	return ips
+}
+
+func getExistingARecordIPs() []string {
+	apiToken := strings.TrimSpace(os.Getenv("CF_API_TOKEN"))
+	apiKey := strings.TrimSpace(os.Getenv("CF_API_KEY"))
+	apiEmail := strings.TrimSpace(os.Getenv("CF_API_EMAIL"))
+	zoneID := strings.TrimSpace(os.Getenv("CF_ZONE_ID"))
+	targetDomain := strings.TrimSpace(os.Getenv("CF_TARGET_DOMAIN"))
+	if zoneID == "" || targetDomain == "" {
+		log.Println("环境变量缺失：CF_ZONE_ID 或 CF_TARGET_DOMAIN，无法获取现有 A 记录")
+		return nil
+	}
+	var (
+		api        *cloudflare.API
+		err        error
+		clientType string
+	)
+	if apiToken != "" {
+		api, err = cloudflare.NewWithAPIToken(apiToken)
+		clientType = "token"
+	} else if apiKey != "" && apiEmail != "" {
+		api, err = cloudflare.New(apiKey, apiEmail)
+		clientType = "key"
+	} else {
+		log.Println("未配置 Cloudflare 认证（CF_API_TOKEN 或 CF_API_KEY/CF_API_EMAIL），跳过获取现有 A 记录")
+		return nil
+	}
+	if err != nil {
+		log.Printf("初始化 Cloudflare API 失败: %v", err)
+		return nil
+	}
+	records, _, err := api.ListDNSRecords(context.Background(), cloudflare.ZoneIdentifier(zoneID), cloudflare.ListDNSRecordsParams{
+		Name: targetDomain,
+		Type: "A",
+	})
+	if err != nil && clientType == "token" && apiKey != "" && apiEmail != "" {
+		msg := err.Error()
+		if strings.Contains(msg, "Authentication error") || strings.Contains(msg, "Unable to authenticate request") || strings.Contains(msg, "Invalid request headers") {
+			api, err = cloudflare.New(apiKey, apiEmail)
+			if err != nil {
+				log.Printf("切换 Key 认证失败: %v", err)
+				return nil
+			}
+			records, _, err = api.ListDNSRecords(context.Background(), cloudflare.ZoneIdentifier(zoneID), cloudflare.ListDNSRecordsParams{
+				Name: targetDomain,
+				Type: "A",
+			})
+		}
+	}
+	if err != nil {
+		log.Printf("获取现有 DNS 记录失败: %v", err)
+		return nil
+	}
+	var ips []string
+	for _, r := range records {
+		if r.Content != "" {
+			ips = append(ips, r.Content)
+		}
+	}
+	return ips
 }
 
 // getIPsFromDomains 解析域名获取 IP 并去重
