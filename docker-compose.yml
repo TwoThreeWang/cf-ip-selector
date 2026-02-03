@@ -7,7 +7,15 @@ services:
         GOPROXY: ${GOPROXY:-https://goproxy.cn,direct}
     container_name: cf-ip-selector
     restart: unless-stopped
+    environment:
+      - HTTP_PROXY=${HTTP_PROXY}
+      - HTTPS_PROXY=${HTTPS_PROXY}
+      - NO_PROXY=${NO_PROXY}
     env_file:
       - .env
+    dns:
+      - 180.76.76.76
+      - 114.114.114.114
+      - 8.8.8.8
     volumes:
       - ./.env:/app/.env:ro

@@ -140,8 +140,21 @@ func getExternalIPs() []string {
 	return out
 }
 
+func newHTTPClient(timeout time.Duration) *http.Client {
+	transport := &http.Transport{
+		Proxy:                 http.ProxyFromEnvironment,
+		DialContext:           (&net.Dialer{Timeout: timeout, KeepAlive: 30 * time.Second}).DialContext,
+		TLSHandshakeTimeout:   timeout,
+		IdleConnTimeout:       90 * time.Second,
+		ExpectContinueTimeout: 2 * time.Second,
+		MaxIdleConns:          100,
+		MaxIdleConnsPerHost:   10,
+	}
+	return &http.Client{Transport: transport, Timeout: timeout}
+}
+
 func fetchVps789IPs(timeout time.Duration) []string {
-	client := &http.Client{Timeout: timeout}
+	client := newHTTPClient(timeout)
 	req, err := http.NewRequest("GET", "https://vps789.com/public/sum/cfIpApi", nil)
 	if err != nil {
 		log.Printf("请求 vps789 失败: %v", err)
@@ -179,7 +192,7 @@ func fetchVps789IPs(timeout time.Duration) []string {
 }
 
 func fetchWeTestIPs(timeout time.Duration) []string {
-	client := &http.Client{Timeout: timeout}
+	client := newHTTPClient(timeout)
 	req, err := http.NewRequest("GET", "https://www.wetest.vip/api/cf2dns/get_cloudflare_ip?key=o1zrmHAF&type=v4", nil)
 	if err != nil {
 		log.Printf("请求 wetest 失败: %v", err)
@@ -524,7 +537,8 @@ func sendBarkNotification(title, body string) {
 	bodyEsc := url.PathEscape(body)
 	urlStr := fmt.Sprintf("%s%s/%s?group=CF优选", barkURL, titleEsc, bodyEsc)
 
-	resp, err := http.Get(urlStr)
+	client := newHTTPClient(10 * time.Second)
+	resp, err := client.Get(urlStr)
 	if err != nil {
 		log.Printf("Bark 推送失败: %v", err)
 		return
