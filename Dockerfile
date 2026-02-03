@@ -8,8 +8,8 @@ RUN --mount=type=cache,target=/go/pkg/mod go mod download
 COPY . .
 RUN --mount=type=cache,target=/root/.cache/go-build CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o cf-ip-selector
 
-FROM alpine:3.20 AS certs
-RUN apk add --no-cache ca-certificates
+FROM alpine:3.19 AS certs
+RUN sed -i 's/dl-cdn.alpinelinux.org/mirrors.aliyun.com/g' /etc/apk/repositories && apk update && apk add --no-cache ca-certificates
 
 FROM scratch
 WORKDIR /app
