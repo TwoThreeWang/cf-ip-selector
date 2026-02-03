@@ -50,6 +50,23 @@
   - Compose 会通过 `env_file: .env` 注入环境变量
   - 同时将 `.env` 挂载为只读到容器 `/app/.env`，程序也可从文件加载
 
+### 构建加速
+- 启用 BuildKit（推荐）：
+  ```bash
+  # Linux/macOS
+  export DOCKER_BUILDKIT=1
+  # Windows PowerShell
+  $env:DOCKER_BUILDKIT = 1
+  ```
+- 设置 Go 模块代理（中国大陆建议使用 goproxy.cn）：
+  ```bash
+  # 临时设置并构建
+  GOPROXY=https://goproxy.cn,direct docker compose build
+  # 或在 .env 中设置 GOPROXY，再执行 docker compose build
+  ```
+- 说明：Dockerfile 已使用 BuildKit 的缓存挂载加速 go mod 下载与编译；
+  Compose 会将 GOPROXY 作为构建参数传入，默认值为 `https://goproxy.cn,direct`。
+
 ## 配置项说明（.env）
 - `CF_API_TOKEN`：Cloudflare API Token（推荐方式）
 - `CF_API_KEY` / `CF_API_EMAIL`：Cloudflare Global API Key 与邮箱（备用）
